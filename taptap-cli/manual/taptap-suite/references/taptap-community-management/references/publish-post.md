@@ -45,9 +45,12 @@
 ### 2. 用发帖选项决定身份与子版块
 
 ```text
+# 只接 --app-id 作为 scope：其余输入走 data，不要额外传 developer_id
 call_tool(name:"community-management get-community-forum-publish-options", args:{
-  app_id:"<目标论坛的 App ID>", developer_id:"<developerId>"})
+  app_id:"<目标论坛的 App ID>"})
 ```
+
+这个 operation 的实时契约只暴露 `--app-id`：多传 `developer_id` 会变成未声明的 `--dev-id` 被 CLI 拒绝。先 `call_tool(name:"<命令>", args:{_help:true})` 确认当前版本的 scope flag，再传参。
 
 - 响应里有官方身份选项(`author_options` 中 `create_params.is_official = true`)→ **默认按官方身份发**;没有才用 `personal`。
 - 子版块**默认发「综合」**(`group_label_id: "0"`,与 `null` 等价)。只有用户提出换子版块时,才把 `group_labels` 列给用户选,不要自己编 ID。

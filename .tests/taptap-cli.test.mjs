@@ -37,6 +37,7 @@ const FIXTURE_TREE = {
     ['help', 'Help about any command'],
     ['profile', 'Manage TapTap server profiles'],
     ['skills', 'List and read the manuals embedded in the CLI'],
+    ['feedback', 'Report a CLI problem to the team'],
     ['overview', 'Summarize login, visible developers, and visible games'],
     ['update', 'Update taptap-cli to the latest version'],
     ['upload', 'Upload an image and ingest it into the app asset library'],
@@ -107,6 +108,7 @@ const FIXTURE_RISK = {
   auth: 'write',
   'auth status': 'read',
   overview: 'read',
+  feedback: 'write',
   version: 'read',
   'task +get': 'read',
   'profile use': 'write',
@@ -582,14 +584,24 @@ test('an identifier operand is not mistaken for a local file', async () => {
   // `task +get <id>`, `profile use <name>`, `schema <service> <method>` and the
   // like take identifiers. Demanding a workdir for them would block a call that
   // reads no file at all.
-  const [task, profile] = await callWorker([
+  const [task, profile, feedback] = await callWorker([
     callTool('task', { cli_path: fakeCli, args: { _positional: ['+get', 'task-1'] } }),
     callTool('profile', { cli_path: fakeCli, args: { _positional: ['use', 'default'] } }),
+    // `feedback` takes the user's own words. Treating that prose as a path
+    // would answer WORKDIR_REQUIRED and leave a blocked user with no way to
+    // report the problem at all.
+    callTool('feedback', {
+      cli_path: fakeCli,
+      args: { _positional: ['app get-app-module 报错看不懂'], dry_run: true },
+    }),
   ]);
   assert.equal(task.result.ok, true);
   assert.deepEqual(task.result.data.envelope.data.echo, ['task', '+get', 'task-1']);
   // …and the write gate still applies where the command is a write.
   assert.equal(profile.result.errorCode, 'CONFIRM_REQUIRED');
+  assert.equal(feedback.result.ok, true, 'a feedback description is prose, not a file');
+  assert.deepEqual(feedback.result.data.envelope.data.echo,
+    ['feedback', 'app get-app-module 报错看不懂', '--dry-run']);
 });
 
 test('a local file operand is refused before the confirmation gate', async () => {
@@ -1153,6 +1165,76 @@ test('the image handoff always carries the upload info on field writes', () => {
   assert.match(rollback, /`from` 对图片字段只给出纯 URL/);
   assert.match(rollback, /直接把它写回去即可/);
   assert.match(rollback, /重新收录/);
+});
+
+test('the manuals carry the 2026.10.29 upstream sync', () => {
+  // Four upstream changes reach the agent only through the plugin manuals:
+  // `taptap-cli feedback` (self-service problem reporting), the target-specific
+  // self-test QR file name, the closed `module_id` enum, and the app scope a
+  // 409 recovery read needs. Each is pinned because the failure it prevents is
+  // silent: without the feedback route a blocked user's complaint is never
+  // filed, a fixed `test-qr.png` turns a second render into a "bad argument"
+  // error, a translated `module_id` reads back as an empty module, and a
+  // scope-less recovery read can land on another game and feed its value into
+  // `expected`.
+  const manualRoot = path.join(root, 'taptap-cli', 'manual');
+  const read = (relative) => fs.readFileSync(path.join(manualRoot, relative), 'utf8');
+
+  const feedback = read('taptap-suite/references/feedback.md');
+  assert.match(feedback, /call_tool\(name:"feedback"/, 'feedback must be shown as a call_tool write');
+  assert.match(feedback, /dry_run: true/, 'feedback is a write, so it goes through the preview gate');
+  assert.match(feedback, /QQ 群 1127966239/, 'the receipt must point at the support group');
+  // A submission is externally visible: the manual may not turn an unknown
+  // outcome into a retry, or one complaint lands twice.
+  assert.match(feedback, /`unknown`/, 'an unknown outcome must be named');
+  assert.doesNotMatch(feedback, /最多重试一次/, 'an unknown submission is not a free retry');
+  // Every trigger goes through the same preview: a `command-failure`
+  // example that jumps to `yes:true` teaches the agent to skip the gate.
+  assert.equal((feedback.match(/trigger:"command-failure", dry_run:true/g) || []).length, 1,
+    'the command-failure example must preview first');
+  assert.doesNotMatch(feedback, /trigger:"command-failure", yes:true/,
+    'no trigger may skip the write gate');
+  assert.match(
+    read('taptap-suite/MANUAL.md'),
+    /taptap-suite\/references\/feedback\.md/,
+    'the suite entry must route to the feedback manual',
+  );
+
+  const packages = read('taptap-suite/references/taptap-package-management/MANUAL.md');
+  assert.match(packages, /artifacts\/test-qr-<packageId>\.png/,
+    'the QR example must name a target-specific file');
+  assert.doesNotMatch(packages, /output:"test-qr\.png"/,
+    'a fixed QR file name collides on the second render');
+
+  const fields = read('taptap-suite/references/taptap-app-edit/references/app-edit-field-map.md');
+  assert.match(fields, /`module_id` 只能取上表这 9 个值/,
+    'the closed module_id enum must be stated');
+
+  // The 409 recovery path re-reads a module; without the scope the worker
+  // forwards nothing and the CLI may fall back to whichever app it last saved,
+  // so the manual has to carry the original pair.
+  const fieldsAndPackages = read(
+    'taptap-suite/references/taptap-app-edit/references/app-edit-fields-and-packages.md',
+  );
+  assert.match(fieldsAndPackages, /409 的 `error_description`/);
+  assert.match(
+    fieldsAndPackages,
+    /call_tool\(name:"app get-app-module", args:\{developer_id:"<developerId>", app_id:"<appId>"/,
+    'the recovery read must name the conflicting app scope',
+  );
+
+  // `get-community-forum-publish-options` exposes only `--app-id` as a scope
+  // flag. A `developer_id` in the example becomes an undeclared `--dev-id`
+  // and the CLI rejects the call before it reads the forum.
+  const publishPost = read(
+    'taptap-suite/references/taptap-community-management/references/publish-post.md',
+  );
+  const exampleStart = publishPost.indexOf(
+    'call_tool(name:"community-management get-community-forum-publish-options"');
+  assert.ok(exampleStart > 0, 'the publish-options example must exist');
+  const exampleEnd = publishPost.indexOf('```', exampleStart);
+  assert.doesNotMatch(publishPost.slice(exampleStart, exampleEnd), /developer_id/,
+    'publish-options exposes no developer scope flag');
 });
 
 test('the install guidance lists commands that actually work', () => {
